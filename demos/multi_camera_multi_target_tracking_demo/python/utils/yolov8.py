@@ -5,7 +5,7 @@ import torch
 from ultralytics.yolo.utils import ops
 from ultralytics.yolo.utils.plotting import colors
 from openvino.runtime import Core, Model
-
+import torch.nn.functional as F
 
 ### YOLOv8
 def plot_one_box(box:np.ndarray, img:np.ndarray, color:Tuple[int, int, int] = None, mask:np.ndarray = None, label:str = None, line_thickness:int = 5):
@@ -132,6 +132,64 @@ def yolov8_preprocess_image(img0: np.ndarray):
     return img
 
 
+def process_mask(protos, masks_in, bboxes, shape, upsample=False):
+    """
+    It takes the output of the mask head, and applies the mask to the bounding boxes. This is faster but produces
+    downsampled quality of mask
+
+    Args:
+      protos (torch.Tensor): [mask_dim, mask_h, mask_w]
+      masks_in (torch.Tensor): [n, mask_dim], n is number of masks after nms
+      bboxes (torch.Tensor): [n, 4], n is number of masks after nms
+      shape (tuple): the size of the input image (h,w)
+
+    Returns:
+      (torch.Tensor): The processed masks.
+    """
+
+    c, mh, mw = protos.shape  # CHW
+    ih, iw = shape
+
+    masks = (masks_in @ protos.float().view(c, -1)).sigmoid().view(-1, mh, mw)  # CHW
+
+    downsampled_bboxes = bboxes.clone()
+    downsampled_bboxes[:, 0] *= mw / iw
+    downsampled_bboxes[:, 2] *= mw / iw
+    downsampled_bboxes[:, 3] *= mh / ih
+    downsampled_bboxes[:, 1] *= mh / ih
+
+    masks = crop_mask(masks, downsampled_bboxes)  # CHW
+    if upsample:
+        masks = F.interpolate(masks[None], shape, mode='bilinear', align_corners=False)[0]  # CHW
+    return masks.gt_(0.5)
+
+def crop_mask(masks, boxes):
+    """
+    It takes a mask and a bounding box, and returns a mask that is cropped to the bounding box
+
+    Args:
+      masks (torch.Tensor): [h, w, n] tensor of masks
+      boxes (torch.Tensor): [n, 4] tensor of bbox coordinates in relative point form
+
+    Returns:
+      (torch.Tensor): The masks are being cropped to the bounding box.
+    """
+    n, h, w = masks.shape
+    x1, y1, x2, y2 = torch.chunk(boxes[:, :, None], 4, 1)  # x1 shape(1,1,n)
+    r = torch.arange(w, device=masks.device, dtype=x1.dtype)[None, None, :]  # rows shape(1,w,1)
+    c = torch.arange(h, device=masks.device, dtype=x1.dtype)[None, :, None]  # cols shape(h,1,1)
+    
+    # print(x1, x1.shape) # 17 1 1
+    # print(r, r.shape) # 1 1 160
+    # print(c, c.shape) # 1 160 1
+    
+    print(r>= x1)
+    print(c>= y1)
+    print((r>=x1) * (c>=y1))
+
+    return masks * ((r >= x1) * (r < x2) * (c >= y1) * (c < y2)) # mask operation
+
+
 def yolov8_postprocess(
     pred_boxes:np.ndarray, 
     input_hw:Tuple[int, int], 
@@ -192,9 +250,12 @@ def yolov8_postprocess(
             segments = [ops.scale_segments(input_hw, x, shape, normalize=False) for x in ops.masks2segments(masks)]
         else:
             print("==========ELSE==========")
+            masks = process_mask(proto[i], pred[:, 6:], pred[:, :4], input_hw, upsample=True)  # HWC
+
+            # c, mh, mw = proto[i].shape
+
             
-            masks = ops.process_mask(proto[i], pred[:, 6:], pred[:, :4], input_hw, upsample=True)  # HWC
-            
+
             pred[:, :4] = ops.scale_boxes(input_hw, pred[:, :4], shape).round()
             gain = min(input_hw[0] / shape[0], input_hw[1] / shape[1])  # gain  = old / new
             pad = (input_hw[1] - shape[1] * gain) / 2, (input_hw[0] - shape[0] * gain) / 2  # wh padding

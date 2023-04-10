@@ -330,7 +330,32 @@ namespace
         }
     };
 
-    void process_mask(cv::Mat protos, std::vector<cv::Mat> proto, std::vector<cv::Rect> bboxes, int inputhw[2], bool upsample = true)
+    void crop_mask(cv::Mat masks, cv::Mat boxes)
+    {
+        /*
+        TODO:
+        source: https://github.com/ultralytics/ultralytics/blob/fe61018975182f4d7645681b4ecc09266939dbfb/ultralytics/yolo/utils/ops.py#L538
+
+        It takes a mask and a bounding box, and returns a mask that is cropped to the bounding box
+        Args:
+            masks (torch.Tensor): [h, w, n] tensor of masks
+            boxes (torch.Tensor): [n, 4] tensor of bbox coordinates in relative point form
+        Returns:
+            (torch.Tensor): The masks are being cropped to the bounding box.
+        */
+        int n = masks.size[0], h = masks.size[1], w = masks.size[2];
+        std::vector<float> x1 = boxes.col(0), y1 = boxes.col(1), x2 = boxes.col(2), y2 = boxes.col(3);
+        
+        // for (auto const &value : x1)
+        // {
+        //     std::cout << value << " ";
+        // }
+        // std::cout << std::endl;
+
+
+    }
+
+    void process_mask(cv::Mat protos, cv::Mat mask_in, cv::Mat bboxes, int inputhw[2], bool upsample = true)
     {
         /*
         source: https://github.com/ultralytics/ultralytics/blob/fe61018975182f4d7645681b4ecc09266939dbfb/ultralytics/yolo/utils/ops.py#L578
@@ -348,7 +373,47 @@ namespace
             (torch.Tensor): The processed masks.
         */
 
+        int c = protos.size[0], mh = protos.size[1], mw = protos.size[2]; // CHW
+        int ih = inputhw[0], iw = inputhw[1];
 
+        std::vector<int> dims{protos.size[0], mh * mw};
+        cv::Mat viewed = cv::Mat(dims.size(), dims.data(), protos.type(), protos.data); // view(c,-1)
+
+        // std::cout << "viewed: " << viewed.at<float>(0, 160) << "\n";
+        // std::cout << "protos(0): " << protos.at<float>(0, 0, 159) << "\n";
+        // std::cout << "protos(1): " << protos.at<float>(0, 1, 0) << "\n";
+        // std::cout << "maskin: " << mask_in.size << "\n";
+        // std::cout << "maskin * viewed = " << mask_in.size << " " << viewed.size << "\n";
+
+        cv::Mat matmul = mask_in * viewed; // (masks_in @ protos.float().view(c, -1))
+
+        // std::cout << "matmul: " << matmul.size << "\n";
+        // std::cout << "matmul(0): " << matmul.at<float>(0,0) << "\n";
+
+        cv::MatIterator_<float> it, end;
+        for (it = matmul.begin<float>(), end = matmul.end<float>(); it != end; ++it)
+        {
+            *it = *it / (1 + std::abs(*it)); // fast sigmoid
+        }
+
+        std::vector<int> masks_dims{matmul.size[0], mh, mw};
+        cv::Mat masks = cv::Mat(masks_dims.size(), masks_dims.data(), matmul.type(), matmul.data); // view(-1, mh, mw)
+
+        // std::cout << "matmul(0) sigmoid: " << matmul.at<float>(0,0) << "\n";
+        // std::cout << "masks: " << masks.size << "\n";
+
+        cv::Mat downsampled_bboxes = bboxes.clone();
+        // std::cout << "bboxes: "<< bboxes.size << " row:" << bboxes.rows << " bboxes[0]: " << bboxes.row(0) << "\n";
+        // std::cout << "bboxes: "<< bboxes.size << " row:" << bboxes.rows << " bboxes[0]: " << bboxes.col(0) << "\n";
+        downsampled_bboxes.col(0) = downsampled_bboxes.col(0) * mw / iw;
+        downsampled_bboxes.col(2) = downsampled_bboxes.col(2) * mw / iw;
+        downsampled_bboxes.col(3) = downsampled_bboxes.col(3) * mw / iw;
+        downsampled_bboxes.col(1) = downsampled_bboxes.col(1) * mh / ih;
+        // std::cout << "downsampled bboxes[0]: " << downsampled_bboxes.col(0) << "\n";
+
+        // crop_mask
+        // masks = crop_mask(masks, downsampled_bboxes) // CHW
+        crop_mask(masks, downsampled_bboxes); // CHW
     }
 } // namespace
 
@@ -455,8 +520,10 @@ int main(int argc, char *argv[])
                 // RESULTS
                 std::vector<int> class_ids;
                 std::vector<float> confidences;
-                std::vector<cv::Rect> boxes;
-                std::vector<cv::Mat> masks_in;
+                cv::Mat boxes_in;
+                std::vector<cv::Rect> boxes_proto;
+                cv::Mat masks_in;
+                std::vector<cv::Mat> masks_proto;
 
                 // Get output data: out0 -> box, out1 -> mask
                 cv::Mat out0 = cv::Mat(NET_LENGHT_OUT0, NUM_BOX, CV_32F, box_tensor.data());
@@ -476,10 +543,6 @@ int main(int argc, char *argv[])
                 std::cout << "gain =" << gain << std::endl;
 #endif
 
-                // paddings[0] = 0.333333;
-                // paddings[1] = 140.0;
-                // paddings[2] = 0.0;
-
                 // Filter Box by CONF_THRESH
                 for (int i = 0; i < NUM_BOX; i++)
                 {
@@ -498,62 +561,62 @@ int main(int argc, char *argv[])
                         float w = out0.at<float>(2, i);
                         float h = out0.at<float>(3, i);
 
-                        // int left = MAX((x - paddings[2] - 0.5 * w) / paddings[0], 0);
-                        // int top = MAX((y - paddings[1] - 0.5 * h) / paddings[0], 0);
-                        // int width = (int)w / paddings[0];
-                        // int height = (int)h / paddings[0];
-
-                        // Revert letterbox operation to get real box pos.
-                        int left = (x - pad[0] - 0.5 * w) / gain;
-                        int top = (y - pad[1] - 0.5 * h) / gain;
-                        int width = (w) / gain;
-                        int height = (h) / gain;
+                        // // Revert letterbox operation to get real box pos.
+                        // int left = (x - pad[0] - 0.5 * w) / gain;
+                        // int top = (y - pad[1] - 0.5 * h) / gain;
+                        // int width = (w) / gain;
+                        // int height = (h) / gain;
 
                         class_ids.push_back(classIdPoint.y);
                         confidences.push_back(max_class_score);
-                        boxes.push_back(cv::Rect(left, top, width, height));
+                        boxes_proto.push_back(cv::Rect(x, y, w, h));
 
                         // Save Mask.
                         cv::Mat temp_mask = out0(cv::Rect(i, 4 + CLASSES, 1, SEG_CHANNELS)).clone(); // mask that relative to the box.
-                        masks_in.push_back(temp_mask.t());
+                        masks_proto.push_back(temp_mask.t());
                     }
                 }
 
                 std::vector<int> nms_result;
-                cv::dnn::NMSBoxes(boxes, confidences, CONF_THRESH, IOU_THRESH, nms_result);
+                cv::dnn::NMSBoxes(boxes_proto, confidences, CONF_THRESH, IOU_THRESH, nms_result);
 
                 std::vector<Detection> _detections{};
-
-#ifdef DEBUG
-                std::cout << "boxes: ";
-#endif
-                // segmentation mask
-                int inputhw [2] = {INPUT_HEIGHT, INPUT_WIDTH};
-                process_mask(out1, masks_in, boxes, inputhw, true);
 
                 for (unsigned long i = 0; i < nms_result.size(); ++i)
                 {
                     int idx = nms_result[i];
+                    // segmentation mask
+                    masks_in.push_back(masks_proto[idx]);
 
                     // detection box
+                    float rectt[4] = {boxes_proto[idx].x, boxes_proto[idx].y, boxes_proto[idx].width, boxes_proto[idx].height};
+                    boxes_in.push_back(cv::Mat(1, 4, CV_32F, rectt));
+
                     Detection result;
                     result.class_id = class_ids[idx];
                     result.confidence = confidences[idx];
 
                     result.color = colorPlatte.getColorsByID(result.class_id);
                     result.class_name = CLASS_NAMES[result.class_id];
-                    result.box = boxes[idx];
 
-#ifdef DEBUG
-                    printf("rect=%d,%d,%d,%d\n", boxes[idx].x, boxes[idx].y, boxes[idx].width, boxes[idx].height);
-#endif
+                    // Revert letterbox operation to get real box pos.
+                    auto box = boxes_proto[idx];
+                    int left = (box.x - pad[0] - 0.5 * box.width) / gain;
+                    int top = (box.y - pad[1] - 0.5 * box.height) / gain;
+                    int width = (box.width) / gain;
+                    int height = (box.height) / gain;
+                    result.box = cv::Rect(left, top, width, height);
+
                     _detections.push_back(result);
-                    DetectionObject obj(boxes[idx].x, boxes[idx].y, boxes[idx].width, boxes[idx].height, result.class_id, result.confidence, result.class_name, result.color);
+                    DetectionObject obj(result.box.x, result.box.y, result.box.width, result.box.height, result.class_id, result.confidence, result.class_name, result.color);
                     objects.push_back(obj);
                 }
-#ifdef DEBUG
-                std::cout << std::endl;
-#endif
+
+                // segmentation mask
+                int inputhw[2] = {INPUT_HEIGHT, INPUT_WIDTH};
+                process_mask(out1, masks_in, boxes_in, inputhw, true);
+
+                // Final detection object
                 std::vector<Detections> detections(1);
                 detections[0].set(new std::vector<DetectionObject>);
 
