@@ -26,13 +26,14 @@ import sys
 
 import cv2 as cv
 
-from utils.network_wrappers import Detector, VectorCNN, MaskRCNN, DetectionsFromFileReader
+from utils.network_wrappers import Detector, VectorCNN, MaskRCNN, DetectionsFromFileReader, YOLOv8Seg
 from mc_tracker.mct import MultiCameraTracker
 from utils.analyzer import save_embeddings
 from utils.misc import read_py_config, check_pressed_keys
 from utils.video import MulticamCapture, NormalizerCLAHE
 from utils.visualization import visualize_multicam_detections, get_target_size
 from openvino.runtime import Core, get_version
+
 
 sys.path.append(str(Path(__file__).resolve().parents[2] / 'common/python'))
 sys.path.append(str(Path(__file__).resolve().parents[2] / 'common/python/openvino/model_zoo'))
@@ -90,6 +91,7 @@ class FramesThreadBody:
     def __call__(self):
         while self.process:
             if self.frames_queue.qsize() > self.max_queue_length:
+                #print("self.frames_queue.qsize():{}".format(self.frames_queue.qsize()))
                 time.sleep(0.1)
                 continue
             has_frames, frames = self.capture.get_frames()
@@ -102,6 +104,9 @@ class FramesThreadBody:
 
 def run(params, config, capture, detector, reid):
     win_name = 'Multi camera tracking'
+    cv.namedWindow(win_name, cv.WINDOW_NORMAL | cv.WINDOW_KEEPRATIO | cv.WINDOW_GUI_EXPANDED)
+    cv.resizeWindow(win_name, 1920, 1080)
+    #cv.namedWindow('mask', cv.WINDOW_NORMAL | cv.WINDOW_KEEPRATIO | cv.WINDOW_GUI_EXPANDED)
     frame_number = 0
     output_detections = [[] for _ in range(capture.get_num_sources())]
     key = -1
@@ -117,7 +122,7 @@ def run(params, config, capture, detector, reid):
     tracker = MultiCameraTracker(capture.get_num_sources(), reid, config.sct_config,
                                  **vars(config.mct_config), visual_analyze=config.analyzer)
 
-    thread_body = FramesThreadBody(capture, max_queue_length=len(capture.captures) * 2)
+    thread_body = FramesThreadBody(capture, max_queue_length=len(capture.captures) * 30)
     frames_thread = Thread(target=thread_body)
     frames_thread.start()
 
@@ -146,6 +151,7 @@ def run(params, config, capture, detector, reid):
             continue
 
         all_detections = detector.wait_and_grab()
+        all_detections_yolov8 = all_detections.copy()
         if params.save_detections:
             update_detections(output_detections, all_detections, frame_number)
         frame_number += 1
@@ -153,13 +159,24 @@ def run(params, config, capture, detector, reid):
 
         all_masks = [[] for _ in range(len(all_detections))]
         for i, detections in enumerate(all_detections):
-            all_detections[i] = [det[0] for det in detections]
-            all_masks[i] = [det[2] for det in detections if len(det) == 3]
+            #all_detections[i] = [det[0] for det in detections]
+            #all_masks[i] = [det[2] for det in detections if len(det) == 3]
+            # YOLOv8
+            #[print(det['det']) for det in detections]
+            for dets in detections:
+                all_detections[i] = [list(det[:4].astype(int)) for det in dets['det']]
+                #all_masks[i] = [det for det in dets['segment']]
+
+        print("all_detections:{}".format(all_detections))
+        print("all_masks:{}".format(all_masks))
 
         tracker.process(prev_frames, all_detections, all_masks)
         tracked_objects = tracker.get_tracked_objects()
+        #tracked_objects = [[]] #[[],[],[],[]]
+        print("tracked_objects:{}".format(tracked_objects))
 
-        vis = visualize_multicam_detections(prev_frames, tracked_objects,
+
+        vis = visualize_multicam_detections(prev_frames, tracked_objects, all_detections_yolov8,
                                             **vars(config.visualization_config))
         metrics.update(start_time, vis)
         presenter.drawGraphs(vis)
@@ -224,7 +241,9 @@ def main():
     parser.add_argument('--t_segmentation', type=float, default=0.6,
                         help='Threshold for object instance segmentation model')
 
-    parser.add_argument('--m_reid', type=str, required=True,
+    parser.add_argument('--m_yolov8seg', type=str, required=False,
+                        help='Path to the YOLOv8 object instance segmentation model')
+    parser.add_argument('--m_reid', type=str, required=False,
                         help='Required. Path to the object re-identification model')
 
     parser.add_argument('--output_video', type=str, default='', required=False,
@@ -258,23 +277,36 @@ def main():
     core = Core()
 
     if args.detections:
+        print("==========DETECTIONS==========")
         object_detector = DetectionsFromFileReader(args.detections, args.t_detector)
     elif args.m_segmentation:
+        print("==========SEGMENTATION==========")
         object_detector = MaskRCNN(core, args.m_segmentation,
                                    config.obj_segm.trg_classes,
                                    args.t_segmentation,
                                    args.device,
                                    capture.get_num_sources())
     else:
-        object_detector = Detector(core, args.m_detector,
+        print("==========YOLOV8-SEG==========")
+        # object_detector = Detector(core, args.m_detector,
+        #                            config.obj_det.trg_classes,
+        #                            args.t_detector,
+        #                            args.device,
+        #                            capture.get_num_sources())
+
+        object_detector_yolov8 = YOLOv8Seg(core, args.m_yolov8seg,
                                    config.obj_det.trg_classes,
                                    args.t_detector,
                                    args.device,
-                                   capture.get_num_sources())
+                                   16) #capture.get_num_sources())
+
+        object_detector = object_detector_yolov8
 
     if args.m_reid:
+        print("==========VECTORCNN==========")
         object_recognizer = VectorCNN(core, args.m_reid, args.device)
     else:
+        print("==========NONE==========")
         object_recognizer = None
 
     run(args, config, capture, object_detector, object_recognizer)

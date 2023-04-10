@@ -21,6 +21,7 @@ import numpy as np
 
 from utils.ie_tools import IEModel
 from .segm_postprocess import postprocess
+from utils.yolov8 import yolov8_preprocess_image, yolov8_postprocess, image_to_tensor
 
 
 class DetectorInterface(ABC):
@@ -282,3 +283,114 @@ class DetectionsFromFileReader(DetectorInterface):
                         valid_detections.append((bbox, score))
             output.append(valid_detections)
         return output
+from openvino.runtime import AsyncInferQueue, Model
+class YOLOv8Seg(DetectorInterface):
+    """Wrapper class for a network returning masks of objects"""
+
+    def __init__(self, core, model_path, trg_classes, conf=.6,
+                 device='CPU', max_reqs=100):
+        self.trg_classes = 80 #trg_classes
+        self.max_reqs = max_reqs
+        self.confidence = conf
+        self.load_model(core, model_path, device, 'YOLOv8 Instance Segmentation', self.max_reqs)
+        self.outputs = {}
+        self.output_keys = {'output0', 'output1'}
+
+    def _preprocess(self, img):
+        preprocessed_image = yolov8_preprocess_image(img)
+        input_tensor = image_to_tensor(preprocessed_image)
+        return input_tensor
+
+    def completion_callback(self, infer_request, id):
+        #self.outputs[id] = infer_request.get_tensor(self.output_tensor_name).data[:]
+        self.outputs[id] = {name: infer_request.get_tensor(name).data[:] for name in self.output_keys}
+
+    def forward(self, img):
+        """Performs forward pass of the wrapped model"""
+        self.forward_async(img, 0)
+        self.infer_queue.wait_all()
+        return self.outputs.pop(0)
+
+    def forward_async(self, img, req_id):
+        input_data = {self.input_tensor_name: self._preprocess(img)}
+        self.infer_queue.start_async(input_data, req_id)
+
+    def grab_all_async(self):
+        self.infer_queue.wait_all()
+        return [self.outputs.pop(i) for i in range(len(self.outputs))]
+
+    def get_allowed_inputs_len(self):
+        return (1, 2)
+
+    def get_allowed_outputs_len(self):
+        return (1, 2, 3, 4, 5)
+
+    def get_input_shape(self):
+        """Returns an input shape of the wrapped model"""
+        return self.model.inputs[0].shape
+
+    def load_model(self, core, model_path, device, model_type, num_reqs=1):
+        """Loads a model in the OpenVINO Runtime format"""
+
+        log.info('Reading {} model {}'.format(model_type, model_path))
+        self.model = core.read_model(model_path)
+
+#self.model.inputs:[<Output: names[images] shape[1,3,?,?] type: f32>]
+#self.model.outputs:[<Output: names[output0] shape[1,116,3..] type: f32>, <Output: names[output1] shape[1,32,1..,1..] type: f32>]
+
+        if len(self.model.inputs) not in self.get_allowed_inputs_len():
+            raise RuntimeError("Supports topologies with only {} inputs, but got {}"
+                .format(self.get_allowed_inputs_len(), len(self.model.inputs)))
+        if len(self.model.outputs) not in self.get_allowed_outputs_len():
+            raise RuntimeError("Supports topologies with only {} outputs, but got {}"
+                .format(self.get_allowed_outputs_len(), len(self.model.outputs)))
+
+        self.input_tensor_name = self.model.inputs[0].get_any_name()
+        self.output_tensor_name = self.model.outputs[0].get_any_name()
+        # Loading model to the plugin
+        if device != "CPU":
+            self.model.reshape({0: [1, 3, 640, 640]})
+        self.compiled_model = core.compile_model(self.model, device)
+
+#self.compiled_model.inputs:[<ConstOutput: names[images] shape[1,3,640,640] type: f32>]
+#self.compiled_model.outputs:[<ConstOutput: names[output0] shape[1,116,8400] type: f32>, <ConstOutput: names[output1] shape[1,32,160,160] type: f32>]
+
+        self.infer_queue = AsyncInferQueue(self.compiled_model, num_reqs)
+        self.infer_queue.set_callback(self.completion_callback)
+        log.info('The {} model {} is loaded to {}'.format(model_type, model_path, device))
+
+    def run_async(self, frames, index):
+        #assert len(frames) <= self.max_num_frames
+        #print("len of frames:{}".format(len(frames)))
+        self.shapes = []
+        self.frame = []
+        for id, frame in enumerate(frames):
+            self.shapes.append(frame.shape)
+            self.frame.append(frame)
+            self.forward_async(frame, id)
+
+    def wait_and_grab(self, only_target_class=True):
+        all_detections = []
+        outputs = self.grab_all_async()
+        for i, out in enumerate(outputs):
+            detections = self.__decode_detections(out, self.shapes[i], self.frame[i], only_target_class)
+            all_detections.append(detections)
+        return all_detections
+
+    def get_detections(self, frames):
+        """Returns all detections on frames"""
+        self.run_async(frames)
+        return self.wait_and_grab()
+
+    def __decode_detections(self, out, frame_shape, frame, only_target_class):
+        detections = []
+        #print("frame_shape:{}".format(frame_shape))
+        boxes = out['output0']
+        # print("boxes:{}".format(boxes))
+        masks = out['output1']
+        # print("masks:{}".format(masks))
+        input_hw = [640,640] #input_tensor.shape[2:]
+        detections = yolov8_postprocess(pred_boxes=boxes, input_hw=input_hw, orig_img=frame, pred_masks=masks)
+        # print("detections:{}".format(detections[0]))
+
+        return detections

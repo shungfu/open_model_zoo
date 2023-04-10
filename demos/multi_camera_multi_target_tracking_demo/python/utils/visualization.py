@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 from utils.misc import COLOR_PALETTE
+from utils.yolov8 import draw_results, label_map
 
 
 def draw_detections(frame, detections, show_all_detections=True):
@@ -64,18 +65,29 @@ def get_target_size(frame_sizes, vis=None, max_window_size=(1920, 1080), stack_f
     return target_width, target_height
 
 
-def visualize_multicam_detections(frames, all_objects, show_all_detections=True,
+def visualize_multicam_detections(frames, all_objects, all_detections, show_all_detections=True,
                                   max_window_size=(1920, 1080), stack_frames='vertical'):
     assert len(frames) == len(all_objects)
     assert stack_frames in ['vertical', 'horizontal']
     vis = None
-    for i, (frame, objects) in enumerate(zip(frames, all_objects)):
-        draw_detections(frame, objects, show_all_detections)
+    vis1 = None
+    for i, (frame, objects, detections) in enumerate(zip(frames, all_objects, all_detections)):
+        #draw_detections(frame, objects, show_all_detections)
+        #print("frame.shape:{}".format(frame.shape))
+        #print("visualize_multicam_detections-detections:{}".format(len(detections)))
+        draw_results(detections[0], frame, label_map)
         if vis is not None:
-            if stack_frames == 'vertical':
-                vis = np.vstack([vis, frame])
-            elif stack_frames == 'horizontal':
+            ##if stack_frames == 'vertical':
+            ##    vis = np.vstack([vis, frame])
+            ##elif stack_frames == 'horizontal':
+            ##    vis = np.hstack([vis, frame])
+            if i == 1:
                 vis = np.hstack([vis, frame])
+            elif i == 2:
+                vis1 = frame
+            elif i == 3:
+                vis1 = np.hstack([vis1, frame])
+                vis = np.vstack([vis, vis1])
         else:
             vis = frame
 
