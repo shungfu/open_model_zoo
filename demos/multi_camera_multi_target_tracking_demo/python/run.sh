@@ -6,3 +6,7 @@ python3 multi_camera_multi_target_tracking_demo.py \
     -i people.mp4
     # -i /opt/code/demos/multi_channel_object_detection_demo_yolov8/cpp/coco_bike.jpg
     
+    
+    
+    
+    

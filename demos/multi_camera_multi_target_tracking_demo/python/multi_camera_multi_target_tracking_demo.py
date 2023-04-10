@@ -166,14 +166,10 @@ def run(params, config, capture, detector, reid):
             for dets in detections:
                 all_detections[i] = [list(det[:4].astype(int)) for det in dets['det']]
                 #all_masks[i] = [det for det in dets['segment']]
-
-        print("all_detections:{}".format(all_detections))
-        print("all_masks:{}".format(all_masks))
-
+                
         tracker.process(prev_frames, all_detections, all_masks)
         tracked_objects = tracker.get_tracked_objects()
         #tracked_objects = [[]] #[[],[],[],[]]
-        print("tracked_objects:{}".format(tracked_objects))
 
 
         vis = visualize_multicam_detections(prev_frames, tracked_objects, all_detections_yolov8,

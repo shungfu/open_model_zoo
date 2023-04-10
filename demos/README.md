@@ -82,6 +82,10 @@ Source code of the demos can be obtained from the Open Model Zoo [GitHub reposit
 ```sh
 git clone --recurse-submodules https://github.com/openvinotoolkit/open_model_zoo.git
 ```
+Pull submodules after cloning the project:
+```sh
+git submodule update --init
+```
 
 C++, C++ G-API and Python\* versions are located in the `cpp`, `cpp_gapi` and `python` subdirectories respectively.
 

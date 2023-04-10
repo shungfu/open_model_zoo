@@ -4,4 +4,4 @@ docker run --device /dev/dri:/dev/dri \
             --group-add="$(stat -c "%g" /dev/dri/render*)" \
             -it -u 0 -p 8888:8888 --shm-size 8G -v $(pwd):/opt/code/ \
             --network host --privileged \
-            --name model_zoo openvino/ubuntu20_dev
+            --name open_model_zoo openvino/ubuntu20_dev

@@ -29,7 +29,6 @@ def plot_one_box(box:np.ndarray, img:np.ndarray, color:Tuple[int, int, int] = No
         tf = max(tl - 1, 1)  # font thickness
         t_size = cv2.getTextSize(label, 0, fontScale=tl / 3, thickness=tf)[0]
         c2 = c1[0] + t_size[0], c1[1] - t_size[1] - 3
-        print(t_size)
         cv2.rectangle(img, c1, c2, color, -1, cv2.LINE_AA)  # filled
         cv2.putText(img, label, (c1[0], c1[1] - 2), 0, tl / 3, [225, 255, 255], thickness=tf, lineType=cv2.LINE_AA)
     if mask is not None:
@@ -171,6 +170,9 @@ def yolov8_postprocess(
     )
     results = []
     proto = torch.from_numpy(pred_masks) if pred_masks is not None else None
+    
+    print("proto" , proto.size())
+    print("preds", len(preds), preds[0].size())
 
     for i, pred in enumerate(preds):
         shape = orig_img[i].shape if isinstance(orig_img, list) else orig_img.shape
@@ -193,18 +195,9 @@ def yolov8_postprocess(
             
             masks = ops.process_mask(proto[i], pred[:, 6:], pred[:, :4], input_hw, upsample=True)  # HWC
             
-            
-            # print(f"pred = {pred[:,:4]}")
-            print("inputhw", input_hw)
-            print("shape", shape)
             pred[:, :4] = ops.scale_boxes(input_hw, pred[:, :4], shape).round()
-            
-            
             gain = min(input_hw[0] / shape[0], input_hw[1] / shape[1])  # gain  = old / new
             pad = (input_hw[1] - shape[1] * gain) / 2, (input_hw[0] - shape[0] * gain) / 2  # wh padding
-            
-            print("paddings", pad)
-            print("gain", gain)
             
             # return boxes
             

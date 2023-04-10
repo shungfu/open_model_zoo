@@ -167,8 +167,8 @@ namespace
         cv::Rect box{};
     };
 
-    const size_t DISP_WIDTH = 1080;
-    const size_t DISP_HEIGHT = 640;
+    const size_t DISP_WIDTH = 1920;
+    const size_t DISP_HEIGHT = 1080;
     const size_t MAX_INPUTS = 25;
 
     struct DisplayParams
@@ -330,9 +330,27 @@ namespace
         }
     };
 
-} // namespace
+    void process_mask(cv::Mat protos, std::vector<cv::Mat> proto, std::vector<cv::Rect> bboxes, int inputhw[2], bool upsample = true)
+    {
+        /*
+        source: https://github.com/ultralytics/ultralytics/blob/fe61018975182f4d7645681b4ecc09266939dbfb/ultralytics/yolo/utils/ops.py#L578
 
-// std::vector<float> paddings(3); // scale, half_h, half_w
+        It takes the output of the mask head, and applies the mask to the bounding boxes. This is faster but produces
+        downsampled quality of mask
+
+        Args:
+            protos (torch.Tensor): [mask_dim, mask_h, mask_w]
+            masks_in (torch.Tensor): [n, mask_dim], n is number of masks after nms
+            bboxes (torch.Tensor): [n, 4], n is number of masks after nms
+            shape (tuple): the size of the input image (h,w)
+
+        Returns:
+            (torch.Tensor): The processed masks.
+        */
+
+
+    }
+} // namespace
 
 int main(int argc, char *argv[])
 {
@@ -413,38 +431,45 @@ int main(int argc, char *argv[])
             {
                 std::vector<DetectionObject> objects;
 
+                // MODEL OUTPUT
                 const ov::Tensor &box_tensor = req.get_output_tensor(0);
                 const ov::Tensor &mask_tensor = req.get_output_tensor(1);
                 auto box_shape = box_tensor.get_shape();
                 auto mask_shape = mask_tensor.get_shape();
 
+                // INPUT
                 static const int INPUT_HEIGHT = inputShape[1];
                 static const int INPUT_WIDTH = inputShape[2];
-                // static const int _segWidth = 160;
-                // static const int _segHeight = 160;
-                static const int _segChannels = 32;
+
+                // SEGMENTATION
+                static const int SEG_WIDTH = mask_shape[3];    // 160
+                static const int SEG_HEIGHT = mask_shape[2];   // 160
+                static const int SEG_CHANNELS = mask_shape[1]; // 32
+                // BOUNDING BOX
                 static const int CLASSES = 80;
-                static const int Num_box = 8400;
+                int NET_LENGHT_OUT0 = box_shape[1];      // 4 + CLASSES + SEG_CHANNELS = 116
+                static const int NUM_BOX = box_shape[2]; // 8400
                 static const float CONF_THRESH = 0.25;
                 static const float IOU_THRESH = 0.7;
 
-                std::vector<int> class_ids;            // ç»“æžœidæ•°ç»„
-                std::vector<float> confidences;        // ç»“æžœæ¯�ä¸ªidå¯¹åº”ç½®ä¿¡åº¦æ•°ç»„
-                std::vector<cv::Rect> boxes;           // æ¯�ä¸ªidçŸ©å½¢æ¡†
-                std::vector<cv::Mat> picked_proposals; // å�Žç»­è®¡ç®—mask
+                // RESULTS
+                std::vector<int> class_ids;
+                std::vector<float> confidences;
+                std::vector<cv::Rect> boxes;
+                std::vector<cv::Mat> masks_in;
 
-                // å¤„ç�†box
-                int net_length = 4 + CLASSES + _segChannels;
-                cv::Mat out1 = cv::Mat(net_length, Num_box, CV_32F, box_tensor.data());
+                // Get output data: out0 -> box, out1 -> mask
+                cv::Mat out0 = cv::Mat(NET_LENGHT_OUT0, NUM_BOX, CV_32F, box_tensor.data());
+                int out1_shape[3] = {SEG_CHANNELS, SEG_HEIGHT, SEG_WIDTH};
+                cv::Mat out1 = cv::Mat(3, out1_shape, CV_32F, mask_tensor.data());
 
 #ifdef DEBUG
+                std::cout << "out0: " << out0.size << " out1: " << out1.size << "\n";
                 std::cout << "inputhw [" << INPUT_HEIGHT << "," << INPUT_WIDTH << "]\n";
                 std::cout << "shape [" << VIDEO_HEIGHT << "," << VIDEO_WIDTH << "]\n";
 #endif
                 float gain = MIN((float)INPUT_HEIGHT / VIDEO_HEIGHT, (float)INPUT_WIDTH / VIDEO_WIDTH);                          // gain = old / new
                 float pad[2] = {(float)(INPUT_WIDTH - VIDEO_WIDTH * gain) / 2, (float)(INPUT_HEIGHT - VIDEO_HEIGHT * gain) / 2}; // wh padding
-                                                                                                                                 // float x_factor = (float)DISP_WIDTH / INPUT_WIDTH;
-                                                                                                                                 // float y_factor = (float)DISP_HEIGHT / INPUT_HEIGHT;
 
 #ifdef DEBUG
                 std::cout << "paddings (" << pad[0] << "," << pad[1] << ")\n";
@@ -455,41 +480,42 @@ int main(int argc, char *argv[])
                 // paddings[1] = 140.0;
                 // paddings[2] = 0.0;
 
-                for (int i = 0; i < Num_box; i++)
+                // Filter Box by CONF_THRESH
+                for (int i = 0; i < NUM_BOX; i++)
                 {
-                    // è¾“å‡ºæ˜¯1*net_length*Num_box;æ‰€ä»¥æ¯�ä¸ªboxçš„å±žæ€§æ˜¯æ¯�éš”Num_boxå�–ä¸€ä¸ªå€¼ï¼Œå…±net_lengthä¸ªå€¼
-                    cv::Mat scores = out1(cv::Rect(i, 4, 1, CLASSES)).clone();
+                    // (i: witch box, 4: start at first score (x,y,x,y, box1, box2,...), 1, only take this box, CLASSES: get all class score)
+                    cv::Mat scores = out0(cv::Rect(i, 4, 1, CLASSES)).clone();
                     cv::Point classIdPoint;
                     double max_class_score;
+
                     minMaxLoc(scores, 0, &max_class_score, 0, &classIdPoint);
+
                     max_class_score = (float)max_class_score;
                     if (max_class_score > CONF_THRESH)
                     {
-                        cv::Mat temp_proto = out1(cv::Rect(i, 4 + CLASSES, 1, _segChannels)).clone();
-                        picked_proposals.push_back(temp_proto.t());
-
-                        float x = out1.at<float>(0, i);
-                        float y = out1.at<float>(1, i);
-                        float w = out1.at<float>(2, i);
-                        float h = out1.at<float>(3, i);
+                        float x = out0.at<float>(0, i);
+                        float y = out0.at<float>(1, i);
+                        float w = out0.at<float>(2, i);
+                        float h = out0.at<float>(3, i);
 
                         // int left = MAX((x - paddings[2] - 0.5 * w) / paddings[0], 0);
                         // int top = MAX((y - paddings[1] - 0.5 * h) / paddings[0], 0);
                         // int width = (int)w / paddings[0];
                         // int height = (int)h / paddings[0];
 
+                        // Revert letterbox operation to get real box pos.
                         int left = (x - pad[0] - 0.5 * w) / gain;
                         int top = (y - pad[1] - 0.5 * h) / gain;
                         int width = (w) / gain;
                         int height = (h) / gain;
-#ifdef DEBUG
-                        std::cout << x << "," << y << "," << w << "," << h << "," << std::endl;
-                        std::cout << left << "," << top << "," << width << "," << height << "," << std::endl;
-#endif
 
                         class_ids.push_back(classIdPoint.y);
                         confidences.push_back(max_class_score);
                         boxes.push_back(cv::Rect(left, top, width, height));
+
+                        // Save Mask.
+                        cv::Mat temp_mask = out0(cv::Rect(i, 4 + CLASSES, 1, SEG_CHANNELS)).clone(); // mask that relative to the box.
+                        masks_in.push_back(temp_mask.t());
                     }
                 }
 
@@ -497,13 +523,19 @@ int main(int argc, char *argv[])
                 cv::dnn::NMSBoxes(boxes, confidences, CONF_THRESH, IOU_THRESH, nms_result);
 
                 std::vector<Detection> _detections{};
+
 #ifdef DEBUG
                 std::cout << "boxes: ";
 #endif
+                // segmentation mask
+                int inputhw [2] = {INPUT_HEIGHT, INPUT_WIDTH};
+                process_mask(out1, masks_in, boxes, inputhw, true);
+
                 for (unsigned long i = 0; i < nms_result.size(); ++i)
                 {
                     int idx = nms_result[i];
 
+                    // detection box
                     Detection result;
                     result.class_id = class_ids[idx];
                     result.confidence = confidences[idx];
@@ -511,6 +543,7 @@ int main(int argc, char *argv[])
                     result.color = colorPlatte.getColorsByID(result.class_id);
                     result.class_name = CLASS_NAMES[result.class_id];
                     result.box = boxes[idx];
+
 #ifdef DEBUG
                     printf("rect=%d,%d,%d,%d\n", boxes[idx].x, boxes[idx].y, boxes[idx].width, boxes[idx].height);
 #endif
