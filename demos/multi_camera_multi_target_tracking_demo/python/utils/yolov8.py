@@ -179,13 +179,16 @@ def crop_mask(masks, boxes):
     r = torch.arange(w, device=masks.device, dtype=x1.dtype)[None, None, :]  # rows shape(1,w,1)
     c = torch.arange(h, device=masks.device, dtype=x1.dtype)[None, :, None]  # cols shape(h,1,1)
     
-    # print(x1, x1.shape) # 17 1 1
+    print(x1, x1.shape) # 17 1 1
+    print(x2, x2.shape) # 17 1 1
+    print(y1, y1.shape) # 17 1 1
     # print(r, r.shape) # 1 1 160
     # print(c, c.shape) # 1 160 1
     
-    print(r>= x1)
-    print(c>= y1)
-    print((r>=x1) * (c>=y1))
+    print((r>= x1).shape, (r>=x1))
+    print((c>= y1).shape, c>= y1)
+    print(((r>= x1) * (c>= y1)).shape, ((r>= x1) * (c>= y1)))
+    # print((r>=x1) * (c>=y1))
 
     return masks * ((r >= x1) * (r < x2) * (c >= y1) * (c < y2)) # mask operation
 
@@ -229,8 +232,8 @@ def yolov8_postprocess(
     results = []
     proto = torch.from_numpy(pred_masks) if pred_masks is not None else None
     
-    print("proto" , proto.size())
-    print("preds", len(preds), preds[0].size())
+    # print("proto" , proto.size())
+    # print("preds", len(preds), preds[0].size())
 
     for i, pred in enumerate(preds):
         shape = orig_img[i].shape if isinstance(orig_img, list) else orig_img.shape
@@ -252,15 +255,7 @@ def yolov8_postprocess(
             print("==========ELSE==========")
             masks = process_mask(proto[i], pred[:, 6:], pred[:, :4], input_hw, upsample=True)  # HWC
 
-            # c, mh, mw = proto[i].shape
-
-            
-
             pred[:, :4] = ops.scale_boxes(input_hw, pred[:, :4], shape).round()
-            gain = min(input_hw[0] / shape[0], input_hw[1] / shape[1])  # gain  = old / new
-            pad = (input_hw[1] - shape[1] * gain) / 2, (input_hw[0] - shape[0] * gain) / 2  # wh padding
-            
-            # return boxes
             
             segments = [ops.scale_segments(input_hw, x, shape, normalize=False) for x in ops.masks2segments(masks)]
         results.append({"det": pred[:, :6].numpy(), "segment": segments})
