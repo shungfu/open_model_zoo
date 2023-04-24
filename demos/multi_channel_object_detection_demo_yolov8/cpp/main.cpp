@@ -132,19 +132,21 @@ namespace
 
     struct DetectionObject
     {
-        int xmin, ymin, xmax, ymax, class_id;
+        int xmin, ymin, width, height, class_id;
         float confidence;
         cv::Scalar color;
         std::string class_name;
+        cv::Mat mask;
 
-        DetectionObject(double x1, double y1, double x2, double y2, int class_id, float confidence, std::string class_name, cv::Scalar color) : xmin{x1},
-                                                                                                                                                ymin{y1},
-                                                                                                                                                xmax{x2},
-                                                                                                                                                ymax{y2},
-                                                                                                                                                class_id{class_id},
-                                                                                                                                                confidence{confidence},
-                                                                                                                                                class_name{class_name},
-                                                                                                                                                color{color}
+        DetectionObject(double x1, double y1, double x2, double y2, int class_id, float confidence, std::string class_name, cv::Scalar color, cv::Mat mask) : xmin{x1},
+                                                                                                                                                              ymin{y1},
+                                                                                                                                                              width{x2},
+                                                                                                                                                              height{y2},
+                                                                                                                                                              class_id{class_id},
+                                                                                                                                                              confidence{confidence},
+                                                                                                                                                              class_name{class_name},
+                                                                                                                                                              color{color},
+                                                                                                                                                              mask{mask}
         {
         }
 
@@ -165,6 +167,7 @@ namespace
         float confidence{0.0};
         cv::Scalar color{};
         cv::Rect box{};
+        cv::Mat mask;
     };
 
     const size_t DISP_WIDTH = 1920;
@@ -217,8 +220,8 @@ namespace
             cv::rectangle(img,
                           cv::Rect2f(static_cast<float>(f.xmin),
                                      static_cast<float>(f.ymin),
-                                     static_cast<float>((f.xmax)),
-                                     static_cast<float>((f.ymax))),
+                                     static_cast<float>(f.width),
+                                     static_cast<float>(f.height)),
                           f.color,
                           tl);
 
@@ -235,6 +238,21 @@ namespace
             {
                 cv::putText(img, label, cv::Point2f(f.xmin, f.ymin - 2), 0, MAX(tl / 3, 1), cv::Scalar(255, 255, 255), MAX(tl - 1, 1));
             }
+
+            // segmentations
+            cv::Mat rgb_mask = cv::Mat::zeros(img.size(), img.type());
+            cv::Mat mask = cv::Mat::zeros(cv::Size(img.cols, img.rows), CV_8UC1);
+            
+            // std::cout << f.mask.size << " " << f.height << " " << f.width << "\n";
+            // f.mask(cv::Range(0, f.height), cv::Range(0, f.width));
+
+            // std::cout << "fmask" << "\n";
+            // mask(cv::Range(f.ymin, f.ymin + f.height), cv::Range(f.xmin, f.xmin + f.width));
+            // std::cout << "mask" << "\n";
+            f.mask(cv::Range(0, f.height), cv::Range(0, f.width)).copyTo(mask(cv::Range(f.ymin, f.ymin + f.height), cv::Range(f.xmin, f.xmin + f.width)));
+            add(rgb_mask, f.color, rgb_mask, mask);
+
+            cv::addWeighted(img, 0.5, rgb_mask, 0.5, 0, img);
         }
     }
 
@@ -330,7 +348,55 @@ namespace
         }
     };
 
-    void crop_mask(cv::Mat masks, cv::Mat boxes)
+    void process_masks(cv::Mat protos, cv::Mat mask_in, cv::Mat bboxes, int inputhw[2], ov::Shape mask_shape, bool upsample = true)
+    {
+        /*
+        source: https://github.com/ultralytics/ultralytics/blob/fe61018975182f4d7645681b4ecc09266939dbfb/ultralytics/yolo/utils/ops.py#L578
+
+        It takes the output of the mask head, and applies the mask to the bounding boxes. This is faster but produces
+        downsampled quality of mask
+
+        Args:
+            protos (torch.Tensor): [mask_dim, mask_h * mask_w]
+            masks_in (torch.Tensor): [n, mask_dim], n is number of masks after nms
+            bboxes (torch.Tensor): [n, 4], n is number of masks after nms
+            shape (tuple): the size of the input image (h,w)
+
+        Returns:
+            (torch.Tensor): The processed masks.
+        */
+
+        // int mc = protos.size[0], mhw = protos.size[1];
+        int mc = mask_shape[1], mh = mask_shape[2], mw = mask_shape[3];
+        int ih = inputhw[0], iw = inputhw[1];
+
+        // std::vector<int> dims{protos.size[0], mh * mw};
+        // cv::Mat viewed = cv::Mat(dims.size(), dims.data(), protos.type(), protos.data); // view(c,-1)
+
+        cv::Mat matmul = mask_in * protos; // (masks_in @ protos.float().view(c, -1))
+
+        cv::MatIterator_<float> it, end;
+        for (it = matmul.begin<float>(), end = matmul.end<float>(); it != end; ++it)
+        {
+            // *it = *it / (1 + std::abs(*it)); // fast sigmoid
+            *it = 1 / (1 + std::exp(-1 * *it)); // sigmoid
+        }
+
+        std::vector<int> masks_dims{matmul.size[0], mh, mw};
+
+        cv::Mat masks = cv::Mat(masks_dims.size(), masks_dims.data(), matmul.type(), matmul.data); // view(-1, mh, mw)
+        cv::Mat downsampled_bboxes = bboxes.clone();
+
+        downsampled_bboxes.col(0) = downsampled_bboxes.col(0) * mw / iw;
+        downsampled_bboxes.col(2) = downsampled_bboxes.col(2) * mw / iw;
+        downsampled_bboxes.col(3) = downsampled_bboxes.col(3) * mw / iw;
+        downsampled_bboxes.col(1) = downsampled_bboxes.col(1) * mh / ih;
+
+        // crop_mask
+        // crop_mask(masks, downsampled_bboxes); // CHW
+    }
+
+    cv::Mat crop_mask(cv::Mat masks, std::vector<float> downsampled_box, std::vector<float> box)
     {
         /*
         TODO:
@@ -343,77 +409,94 @@ namespace
         Returns:
             (torch.Tensor): The masks are being cropped to the bounding box.
         */
-        int n = masks.size[0], h = masks.size[1], w = masks.size[2];
-        std::vector<float> x1 = boxes.col(0), y1 = boxes.col(1), x2 = boxes.col(2), y2 = boxes.col(3);
-        
+        int mh = masks.size[0], mw = masks.size[1];
+        float mx1 = std::min(std::max((float)0, downsampled_box[0]), (float)mw);
+        float my1 = std::min(std::max((float)0, downsampled_box[1]), (float)mh);
+        float mx2 = std::min(std::max((float)0, downsampled_box[2]), (float)mw);
+        float my2 = std::min(std::max((float)0, downsampled_box[3]), (float)mh);
+
+        float x1 = std::max((float)0, box[0]);
+        float y1 = std::max((float)0, box[1]);
+        float x2 = std::max((float)0, box[2]);
+        float y2 = std::max((float)0, box[3]);
+
+        // std::cout << "h: " << mh << " w: " << mw << "\n";
+        // std::cout << "x1: " << x1 << " y1: " << y1 << " x2: " << x2 << " y2: " << y2 << "\n";
+        cv::Mat mask_roi = masks(cv::Range(my1, my2), cv::Range(mx1, mx2));
+        cv::Mat rm, det_mask;
+        cv::resize(mask_roi, rm, cv::Size(x2 - x1, y2 - y1));
+
+        std::cout << "mask_roi:" << mask_roi.size << "\n";
+        std::cout << "rm: " << rm.size << "\n";
+
+        // mask.gt_(0.5)
+        for (int r = 0; r < rm.rows; r++)
+        {
+            for (int c = 0; c < rm.cols; c++)
+            {
+                float pv = rm.at<float>(r, c);
+                if (pv > 0.5)
+                {
+                    rm.at<float>(r, c) = 1.0;
+                }
+                else
+                {
+                    rm.at<float>(r, c) = 0.0;
+                }
+            }
+        }
+        cv::RNG rng;
+        rm = rm * rng.uniform(0, 255);
+        rm.convertTo(det_mask, CV_8UC1);
+        return det_mask;
+
+        // cv::Mat(cv::Mat::zeros(mh, mw, CV_32F), cv::Rect(x1, y1, x2 - x1, y2 - y1));
+        // std::cout << "zero mask: " << "\n";
+        // for (int r = 0 ; r < zero.rows; r++) {
+        //     std::cout << "[";
+        //     for (int c = 0; c < zero.cols; c++) {
+        //         std::cout << zero.at<float>(r,c);
+        //     }
+        //     std::cout << "]\n";
+        // }
         // for (auto const &value : x1)
         // {
         //     std::cout << value << " ";
         // }
         // std::cout << std::endl;
-
-
     }
 
-    void process_mask(cv::Mat protos, cv::Mat mask_in, cv::Mat bboxes, int inputhw[2], bool upsample = true)
+    float sigmoid_function(float a)
     {
-        /*
-        source: https://github.com/ultralytics/ultralytics/blob/fe61018975182f4d7645681b4ecc09266939dbfb/ultralytics/yolo/utils/ops.py#L578
+        float b = 1. / (1. + exp(-a));
+        return b;
+    }
 
-        It takes the output of the mask head, and applies the mask to the bounding boxes. This is faster but produces
-        downsampled quality of mask
+    cv::Mat process_mask(cv::Mat protos, cv::Mat mask_in, cv::Mat bbox, cv::Mat scaled_bbox, int inputhw[2], ov::Shape mask_shape)
+    {
 
-        Args:
-            protos (torch.Tensor): [mask_dim, mask_h, mask_w]
-            masks_in (torch.Tensor): [n, mask_dim], n is number of masks after nms
-            bboxes (torch.Tensor): [n, 4], n is number of masks after nms
-            shape (tuple): the size of the input image (h,w)
-
-        Returns:
-            (torch.Tensor): The processed masks.
-        */
-
-        int c = protos.size[0], mh = protos.size[1], mw = protos.size[2]; // CHW
+        int mc = mask_shape[1], mh = mask_shape[2], mw = mask_shape[3];
         int ih = inputhw[0], iw = inputhw[1];
 
-        std::vector<int> dims{protos.size[0], mh * mw};
-        cv::Mat viewed = cv::Mat(dims.size(), dims.data(), protos.type(), protos.data); // view(c,-1)
-
-        // std::cout << "viewed: " << viewed.at<float>(0, 160) << "\n";
-        // std::cout << "protos(0): " << protos.at<float>(0, 0, 159) << "\n";
-        // std::cout << "protos(1): " << protos.at<float>(0, 1, 0) << "\n";
-        // std::cout << "maskin: " << mask_in.size << "\n";
-        // std::cout << "maskin * viewed = " << mask_in.size << " " << viewed.size << "\n";
-
-        cv::Mat matmul = mask_in * viewed; // (masks_in @ protos.float().view(c, -1))
-
-        // std::cout << "matmul: " << matmul.size << "\n";
-        // std::cout << "matmul(0): " << matmul.at<float>(0,0) << "\n";
+        cv::Mat matmul = mask_in * protos; // (masks_in @ protos.float().view(c, -1))
 
         cv::MatIterator_<float> it, end;
         for (it = matmul.begin<float>(), end = matmul.end<float>(); it != end; ++it)
         {
-            *it = *it / (1 + std::abs(*it)); // fast sigmoid
+            // *it = *it / (1 + std::abs(*it)); // fast sigmoid
+            *it = sigmoid_function(*it);
         }
 
-        std::vector<int> masks_dims{matmul.size[0], mh, mw};
-        cv::Mat masks = cv::Mat(masks_dims.size(), masks_dims.data(), matmul.type(), matmul.data); // view(-1, mh, mw)
+        cv::Mat results = matmul.reshape(1, 160); // 1x25600 -> 160x160
 
-        // std::cout << "matmul(0) sigmoid: " << matmul.at<float>(0,0) << "\n";
-        // std::cout << "masks: " << masks.size << "\n";
+        std::vector<float> downsampled_bboxes = bbox.clone();
 
-        cv::Mat downsampled_bboxes = bboxes.clone();
-        // std::cout << "bboxes: "<< bboxes.size << " row:" << bboxes.rows << " bboxes[0]: " << bboxes.row(0) << "\n";
-        // std::cout << "bboxes: "<< bboxes.size << " row:" << bboxes.rows << " bboxes[0]: " << bboxes.col(0) << "\n";
-        downsampled_bboxes.col(0) = downsampled_bboxes.col(0) * mw / iw;
-        downsampled_bboxes.col(2) = downsampled_bboxes.col(2) * mw / iw;
-        downsampled_bboxes.col(3) = downsampled_bboxes.col(3) * mw / iw;
-        downsampled_bboxes.col(1) = downsampled_bboxes.col(1) * mh / ih;
-        // std::cout << "downsampled bboxes[0]: " << downsampled_bboxes.col(0) << "\n";
+        downsampled_bboxes[0] = downsampled_bboxes[0] * mw / iw;
+        downsampled_bboxes[2] = downsampled_bboxes[2] * mw / iw;
+        downsampled_bboxes[3] = downsampled_bboxes[3] * mh / ih;
+        downsampled_bboxes[1] = downsampled_bboxes[1] * mh / ih;
 
-        // crop_mask
-        // masks = crop_mask(masks, downsampled_bboxes) // CHW
-        crop_mask(masks, downsampled_bboxes); // CHW
+        return crop_mask(results, downsampled_bboxes, scaled_bbox);
     }
 } // namespace
 
@@ -498,7 +581,8 @@ int main(int argc, char *argv[])
 
                 // MODEL OUTPUT
                 const ov::Tensor &box_tensor = req.get_output_tensor(0);
-                const ov::Tensor &mask_tensor = req.get_output_tensor(1);
+                // const ov::Tensor &mask_tensor = req.get_output_tensor(1);
+                ov::Tensor mask_tensor = req.get_output_tensor(1);
                 auto box_shape = box_tensor.get_shape();
                 auto mask_shape = mask_tensor.get_shape();
 
@@ -520,15 +604,20 @@ int main(int argc, char *argv[])
                 // RESULTS
                 std::vector<int> class_ids;
                 std::vector<float> confidences;
-                cv::Mat boxes_in;
+                // cv::Mat boxes_in;
                 std::vector<cv::Rect> boxes_proto;
-                cv::Mat masks_in;
+                // cv::Mat masks_in;
                 std::vector<cv::Mat> masks_proto;
 
-                // Get output data: out0 -> box, out1 -> mask
+                // out0 -> box: 116 * 8400
                 cv::Mat out0 = cv::Mat(NET_LENGHT_OUT0, NUM_BOX, CV_32F, box_tensor.data());
-                int out1_shape[3] = {SEG_CHANNELS, SEG_HEIGHT, SEG_WIDTH};
-                cv::Mat out1 = cv::Mat(3, out1_shape, CV_32F, mask_tensor.data());
+                // out1 -> mask: 32 * (160*160), viewed here
+                cv::Mat out1 = cv::Mat(SEG_CHANNELS, (SEG_HEIGHT * SEG_WIDTH), CV_32F, mask_tensor.data());
+            // int out1_shape[3] = {SEG_CHANNELS, SEG_HEIGHT, SEG_WIDTH};
+            // cv::Mat out1 = cv::Mat(3, out1_shape, CV_32F, mask_tensor.data()); // Change mask_tensor shape
+
+            // std::cout << "out0: " << out0.size << "\n";
+            // std::cout << "out1: " << out1.size << "\n";
 
 #ifdef DEBUG
                 std::cout << "out0: " << out0.size << " out1: " << out1.size << "\n";
@@ -561,11 +650,7 @@ int main(int argc, char *argv[])
                         float w = out0.at<float>(2, i);
                         float h = out0.at<float>(3, i);
 
-                        // // Revert letterbox operation to get real box pos.
-                        // int left = (x - pad[0] - 0.5 * w) / gain;
-                        // int top = (y - pad[1] - 0.5 * h) / gain;
-                        // int width = (w) / gain;
-                        // int height = (h) / gain;
+                        // std::cout << "x " << x << " y " << y << " w " << w << " h " << h << "\n";
 
                         class_ids.push_back(classIdPoint.y);
                         confidences.push_back(max_class_score);
@@ -580,24 +665,14 @@ int main(int argc, char *argv[])
                 std::vector<int> nms_result;
                 cv::dnn::NMSBoxes(boxes_proto, confidences, CONF_THRESH, IOU_THRESH, nms_result);
 
-                std::vector<Detection> _detections{};
+                // std::vector<Detection> _detections{};
+                int inputhw[2] = {INPUT_HEIGHT, INPUT_WIDTH};
 
                 for (unsigned long i = 0; i < nms_result.size(); ++i)
                 {
                     int idx = nms_result[i];
-                    // segmentation mask
-                    masks_in.push_back(masks_proto[idx]);
-
-                    // detection box
-                    float rectt[4] = {boxes_proto[idx].x, boxes_proto[idx].y, boxes_proto[idx].width, boxes_proto[idx].height};
-                    boxes_in.push_back(cv::Mat(1, 4, CV_32F, rectt));
-
-                    Detection result;
-                    result.class_id = class_ids[idx];
-                    result.confidence = confidences[idx];
-
-                    result.color = colorPlatte.getColorsByID(result.class_id);
-                    result.class_name = CLASS_NAMES[result.class_id];
+                    // // segmentation mask
+                    // masks_in.push_back(masks_proto[idx]);
 
                     // Revert letterbox operation to get real box pos.
                     auto box = boxes_proto[idx];
@@ -605,16 +680,30 @@ int main(int argc, char *argv[])
                     int top = (box.y - pad[1] - 0.5 * box.height) / gain;
                     int width = (box.width) / gain;
                     int height = (box.height) / gain;
+
+                    // detection box
+                    float rectt[4] = {box.x, box.y, box.x + box.width, box.y + box.height};
+                    float scaled_rectt[4] = {left, top, left + width, top + height};
+                    // boxes_in.push_back(cv::Mat(1, 4, CV_32F, rectt));
+
+                    std::cout << "--> x1 " << box.x << " y1 " << box.y << " x2 " << box.x + box.width << " y2 " << box.y + box.height << "\n";
+                    auto segment = process_mask(out1, masks_proto[idx], cv::Mat(1, 4, CV_32F, rectt), cv::Mat(1, 4, CV_32F, scaled_rectt), inputhw, mask_shape);
+
+                    Detection result;
+                    result.class_id = class_ids[idx];
+                    result.confidence = confidences[idx];
+
+                    result.color = colorPlatte.getColorsByID(result.class_id);
+                    result.class_name = CLASS_NAMES[result.class_id];
                     result.box = cv::Rect(left, top, width, height);
 
-                    _detections.push_back(result);
-                    DetectionObject obj(result.box.x, result.box.y, result.box.width, result.box.height, result.class_id, result.confidence, result.class_name, result.color);
+                    // _detections.push_back(result);
+                    DetectionObject obj(result.box.x, result.box.y, result.box.width, result.box.height, result.class_id, result.confidence, result.class_name, result.color, segment);
                     objects.push_back(obj);
                 }
 
                 // segmentation mask
-                int inputhw[2] = {INPUT_HEIGHT, INPUT_WIDTH};
-                process_mask(out1, masks_in, boxes_in, inputhw, true);
+                // process_masks(out1, masks_in, boxes_in, inputhw, mask_shape, true);
 
                 // Final detection object
                 std::vector<Detections> detections(1);

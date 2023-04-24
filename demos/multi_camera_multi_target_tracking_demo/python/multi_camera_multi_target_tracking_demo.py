@@ -105,7 +105,7 @@ class FramesThreadBody:
 def run(params, config, capture, detector, reid):
     win_name = 'Multi camera tracking'
     cv.namedWindow(win_name, cv.WINDOW_NORMAL | cv.WINDOW_KEEPRATIO | cv.WINDOW_GUI_EXPANDED)
-    cv.resizeWindow(win_name, 600, 600)
+    cv.resizeWindow(win_name, 1920, 1080)
     #cv.namedWindow('mask', cv.WINDOW_NORMAL | cv.WINDOW_KEEPRATIO | cv.WINDOW_GUI_EXPANDED)
     frame_number = 0
     output_detections = [[] for _ in range(capture.get_num_sources())]
