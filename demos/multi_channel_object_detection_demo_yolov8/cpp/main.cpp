@@ -136,17 +136,18 @@ namespace
         float confidence;
         cv::Scalar color;
         std::string class_name;
-        cv::Mat mask;
+        std::vector<cv::Point> segment;
 
-        DetectionObject(double x1, double y1, double x2, double y2, int class_id, float confidence, std::string class_name, cv::Scalar color, cv::Mat mask) : xmin{x1},
-                                                                                                                                                              ymin{y1},
-                                                                                                                                                              width{x2},
-                                                                                                                                                              height{y2},
-                                                                                                                                                              class_id{class_id},
-                                                                                                                                                              confidence{confidence},
-                                                                                                                                                              class_name{class_name},
-                                                                                                                                                              color{color},
-                                                                                                                                                              mask{mask}
+        DetectionObject(double x1, double y1, double x2, double y2, int class_id, float confidence,
+                        std::string class_name, cv::Scalar color, std::vector<cv::Point> segment) : xmin{x1},
+                                                                                                    ymin{y1},
+                                                                                                    width{x2},
+                                                                                                    height{y2},
+                                                                                                    class_id{class_id},
+                                                                                                    confidence{confidence},
+                                                                                                    class_name{class_name},
+                                                                                                    color{color},
+                                                                                                    segment{segment}
         {
         }
 
@@ -211,6 +212,7 @@ namespace
 
     void drawDetections(cv::Mat &img, const std::vector<DetectionObject> &detections)
     {
+
         // printf("drawDetections\n");
         for (const DetectionObject &f : detections)
         {
@@ -240,19 +242,15 @@ namespace
             }
 
             // segmentations
-            cv::Mat rgb_mask = cv::Mat::zeros(img.size(), img.type());
-            cv::Mat mask = cv::Mat::zeros(cv::Size(img.cols, img.rows), CV_8UC1);
-            
-            // std::cout << f.mask.size << " " << f.height << " " << f.width << "\n";
-            // f.mask(cv::Range(0, f.height), cv::Range(0, f.width));
 
-            // std::cout << "fmask" << "\n";
-            // mask(cv::Range(f.ymin, f.ymin + f.height), cv::Range(f.xmin, f.xmin + f.width));
-            // std::cout << "mask" << "\n";
-            f.mask(cv::Range(0, f.height), cv::Range(0, f.width)).copyTo(mask(cv::Range(f.ymin, f.ymin + f.height), cv::Range(f.xmin, f.xmin + f.width)));
-            add(rgb_mask, f.color, rgb_mask, mask);
-
-            cv::addWeighted(img, 0.5, rgb_mask, 0.5, 0, img);
+            // cv2.fillPoly(img, pts=[mask.astype(int)], color=color)
+            if (f.segment.size() > 0)
+            {
+                cv::Mat img_with_mask;
+                img.copyTo(img_with_mask);
+                cv::fillPoly(img_with_mask, std::vector<std::vector<cv::Point>>{f.segment}, f.color);
+                cv::addWeighted(img, 0.5, img_with_mask, 0.5, 1, img);
+            }
         }
     }
 
@@ -396,10 +394,10 @@ namespace
         // crop_mask(masks, downsampled_bboxes); // CHW
     }
 
-    cv::Mat crop_mask(cv::Mat masks, std::vector<float> downsampled_box, std::vector<float> box)
+    cv::Mat crop_mask(cv::Mat mask_in, std::vector<float> downsampled_box)
     {
         /*
-        TODO:
+        BUG:
         source: https://github.com/ultralytics/ultralytics/blob/fe61018975182f4d7645681b4ecc09266939dbfb/ultralytics/yolo/utils/ops.py#L538
 
         It takes a mask and a bounding box, and returns a mask that is cropped to the bounding box
@@ -409,75 +407,33 @@ namespace
         Returns:
             (torch.Tensor): The masks are being cropped to the bounding box.
         */
-        int mh = masks.size[0], mw = masks.size[1];
+        int mh = mask_in.size[0], mw = mask_in.size[1];
         float mx1 = std::min(std::max((float)0, downsampled_box[0]), (float)mw);
         float my1 = std::min(std::max((float)0, downsampled_box[1]), (float)mh);
         float mx2 = std::min(std::max((float)0, downsampled_box[2]), (float)mw);
         float my2 = std::min(std::max((float)0, downsampled_box[3]), (float)mh);
 
-        float x1 = std::max((float)0, box[0]);
-        float y1 = std::max((float)0, box[1]);
-        float x2 = std::max((float)0, box[2]);
-        float y2 = std::max((float)0, box[3]);
+        // cv::Mat mask_roi = masks(cv::Range(my1, my2), cv::Range(mx1, mx2));
+        cv::Mat mask_roi = cv::Mat::zeros(mh, mw, CV_8U);
+        mask_roi(cv::Range(my1, my2), cv::Range(mx1, mx2)) = 255;
+        cv::Mat masked;
+        cv::bitwise_and(mask_in, mask_in, masked, mask_roi);
 
-        // std::cout << "h: " << mh << " w: " << mw << "\n";
-        // std::cout << "x1: " << x1 << " y1: " << y1 << " x2: " << x2 << " y2: " << y2 << "\n";
-        cv::Mat mask_roi = masks(cv::Range(my1, my2), cv::Range(mx1, mx2));
-        cv::Mat rm, det_mask;
-        cv::resize(mask_roi, rm, cv::Size(x2 - x1, y2 - y1));
-
-        std::cout << "mask_roi:" << mask_roi.size << "\n";
-        std::cout << "rm: " << rm.size << "\n";
-
-        // mask.gt_(0.5)
-        for (int r = 0; r < rm.rows; r++)
-        {
-            for (int c = 0; c < rm.cols; c++)
-            {
-                float pv = rm.at<float>(r, c);
-                if (pv > 0.5)
-                {
-                    rm.at<float>(r, c) = 1.0;
-                }
-                else
-                {
-                    rm.at<float>(r, c) = 0.0;
-                }
-            }
-        }
-        cv::RNG rng;
-        rm = rm * rng.uniform(0, 255);
-        rm.convertTo(det_mask, CV_8UC1);
-        return det_mask;
-
-        // cv::Mat(cv::Mat::zeros(mh, mw, CV_32F), cv::Rect(x1, y1, x2 - x1, y2 - y1));
-        // std::cout << "zero mask: " << "\n";
-        // for (int r = 0 ; r < zero.rows; r++) {
-        //     std::cout << "[";
-        //     for (int c = 0; c < zero.cols; c++) {
-        //         std::cout << zero.at<float>(r,c);
-        //     }
-        //     std::cout << "]\n";
-        // }
-        // for (auto const &value : x1)
-        // {
-        //     std::cout << value << " ";
-        // }
-        // std::cout << std::endl;
+        return masked;
     }
 
     float sigmoid_function(float a)
     {
-        float b = 1. / (1. + exp(-a));
-        return b;
+        return 1. / (1. + exp(-1 * a));
     }
 
-    cv::Mat process_mask(cv::Mat protos, cv::Mat mask_in, cv::Mat bbox, cv::Mat scaled_bbox, int inputhw[2], ov::Shape mask_shape)
+    cv::Mat process_mask(cv::Mat protos, cv::Mat mask_in, cv::Mat bbox, cv::Mat scaled_bbox, int inputhw[2], ov::Shape mask_shape, bool upsample = true)
     {
-
         int mc = mask_shape[1], mh = mask_shape[2], mw = mask_shape[3];
         int ih = inputhw[0], iw = inputhw[1];
 
+        // std::cout << "mask_in: " << mask_in.size << "\n";
+        // std::cout << "protos: " << protos.size << "\n";
         cv::Mat matmul = mask_in * protos; // (masks_in @ protos.float().view(c, -1))
 
         cv::MatIterator_<float> it, end;
@@ -496,8 +452,76 @@ namespace
         downsampled_bboxes[3] = downsampled_bboxes[3] * mh / ih;
         downsampled_bboxes[1] = downsampled_bboxes[1] * mh / ih;
 
-        return crop_mask(results, downsampled_bboxes, scaled_bbox);
+        cv::Mat masked = crop_mask(results, downsampled_bboxes);
+
+        if (upsample == true)
+        {
+            cv::resize(masked, masked, cv::Size(ih, iw), 0., 0., cv::INTER_LINEAR);
+        }
+
+        // std::cout << "masked: "
+        //           << "\n";
+        for (int r = 0; r < masked.rows; r++)
+        {
+            // std::cout << "[";
+            for (int c = 0; c < masked.cols; c++)
+            {
+                float pv = masked.at<float>(r, c);
+                // // mask.gt_(0.5)
+                if (pv <= 0.5)
+                {
+                    masked.at<float>(r, c) = 0.0;
+                }
+                // std::cout << masked.at<float>(r, c) << ", ";
+            }
+            // std::cout << "]\n";
+        }
+
+        return masked;
     }
+
+    std::vector<cv::Point> mask2segments(cv::Mat mask_float)
+    {
+        cv::Mat mask_int;
+        mask_float.convertTo(mask_int, CV_8U);
+
+        std::vector<std::vector<cv::Point>> contours;
+        cv::findContours(mask_int, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+        std::vector<cv::Point> max_contour;
+
+        if (!contours.empty())
+        {
+            int max_len = 0;
+            int max_idx = 0;
+            // Find the index of the contour with max len
+            for (int i = 0; i < contours.size(); i++)
+            {
+                if (contours[i].size() > max_len)
+                {
+                    max_len = contours[i].size();
+                    max_idx = i;
+                }
+            }
+            // Get the contour with the max len and reshape to 2D
+            max_contour = contours[max_idx];
+        }
+
+        return max_contour;
+    }
+
+    std::vector<cv::Point> scale_segments(float gain, float pad[2], std::vector<cv::Point> segment, int VIDEO_HEIGHT, int VIDEO_WIDTH)
+    {
+        for (int i = 0; i < segment.size(); i++)
+        {
+            // segment[i].x = std::max((int)((segment[i].x - pad[0]) / gain), VIDEO_WIDTH);
+            // segment[i].y = std::max((int)((segment[i].y - pad[1]) / gain), VIDEO_HEIGHT);
+
+            segment[i].x = (segment[i].x - pad[0]) / gain;
+            segment[i].y = (segment[i].y - pad[1]) / gain;
+        }
+        return segment;
+    }
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -682,12 +706,14 @@ int main(int argc, char *argv[])
                     int height = (box.height) / gain;
 
                     // detection box
-                    float rectt[4] = {box.x, box.y, box.x + box.width, box.y + box.height};
-                    float scaled_rectt[4] = {left, top, left + width, top + height};
+                    // xywh2xyxy
+                    float rectt[4] = {box.x - box.width / 2, box.y - box.height / 2, box.x + box.width / 2, box.y + box.height / 2};
+                    float scaled_rectt[4] = {left - width / 2, top - height / 2, left + width / 2, top + height / 2};
                     // boxes_in.push_back(cv::Mat(1, 4, CV_32F, rectt));
 
-                    std::cout << "--> x1 " << box.x << " y1 " << box.y << " x2 " << box.x + box.width << " y2 " << box.y + box.height << "\n";
-                    auto segment = process_mask(out1, masks_proto[idx], cv::Mat(1, 4, CV_32F, rectt), cv::Mat(1, 4, CV_32F, scaled_rectt), inputhw, mask_shape);
+                    // std::cout << "--> x1 " << box.x << " y1 " << box.y << " x2 " << box.x + box.width << " y2 " << box.y + box.height << "\n";
+                    auto mask = process_mask(out1, masks_proto[idx], cv::Mat(1, 4, CV_32F, rectt), cv::Mat(1, 4, CV_32F, scaled_rectt), inputhw, mask_shape);
+                    std::vector<cv::Point> segment = scale_segments(gain, pad, mask2segments(mask), VIDEO_HEIGHT, VIDEO_WIDTH);
 
                     Detection result;
                     result.class_id = class_ids[idx];
