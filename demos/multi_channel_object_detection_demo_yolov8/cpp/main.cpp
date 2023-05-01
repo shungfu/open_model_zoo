@@ -714,6 +714,7 @@ int main(int argc, char *argv[])
                     // std::cout << "--> x1 " << box.x << " y1 " << box.y << " x2 " << box.x + box.width << " y2 " << box.y + box.height << "\n";
                     auto mask = process_mask(out1, masks_proto[idx], cv::Mat(1, 4, CV_32F, rectt), cv::Mat(1, 4, CV_32F, scaled_rectt), inputhw, mask_shape);
                     std::vector<cv::Point> segment = scale_segments(gain, pad, mask2segments(mask), VIDEO_HEIGHT, VIDEO_WIDTH);
+                    // std::vector<cv::Point> segment = mask2segments(mask);
 
                     Detection result;
                     result.class_id = class_ids[idx];

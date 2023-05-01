@@ -361,7 +361,6 @@ class YOLOv8Seg(DetectorInterface):
 
     def run_async(self, frames, index):
         #assert len(frames) <= self.max_num_frames
-        #print("len of frames:{}".format(len(frames)))
         self.shapes = []
         self.frame = []
         for id, frame in enumerate(frames):
@@ -384,7 +383,6 @@ class YOLOv8Seg(DetectorInterface):
 
     def __decode_detections(self, out, frame_shape, frame, only_target_class):
         detections = []
-        #print("frame_shape:{}".format(frame_shape))
         boxes = out['output0']
         # print("boxes:{}".format(boxes))
         masks = out['output1']

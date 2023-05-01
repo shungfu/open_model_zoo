@@ -25,7 +25,6 @@ def plot_one_box(box:np.ndarray, img:np.ndarray, color:Tuple[int, int, int] = No
     color = color or [random.randint(0, 255) for _ in range(3)]
     c1, c2 = (int(box[0]), int(box[1])), (int(box[2]), int(box[3]))
     cv2.rectangle(img, c1, c2, color, thickness=tl, lineType=cv2.LINE_AA)
-    #print("plot_one_box:{}-{}".format(c1,c2))
     if label:
         tf = max(tl - 1, 1)  # font thickness
         t_size = cv2.getTextSize(label, 0, fontScale=tl / 3, thickness=tf)[0]
@@ -50,16 +49,14 @@ def draw_results(results:Dict, source_image:np.ndarray, label_map:Dict):
     Returns:
         
     """
-    #print("draw_results:{}".format(results))
     boxes = results["det"]
     masks = results.get("segment")
     for idx, (*xyxy, conf, lbl) in enumerate(boxes):
-        #print("draw_results:{}".format(idx))
         label = f'{label_map[int(lbl)]} {conf:.2f}'
         mask = masks[idx] if masks is not None else None 
 
         source_image = plot_one_box(xyxy, source_image, mask=mask, label=label, color=colors(int(lbl)), line_thickness=1)
-    #return source_image
+    return source_image
 
 def letterbox(img: np.ndarray, new_shape:Tuple[int, int] = (640, 640), color:Tuple[int, int, int] = (114, 114, 114), auto:bool = False, scale_fill:bool = False, scaleup:bool = False, stride:int = 32):
     """
@@ -132,141 +129,6 @@ def yolov8_preprocess_image(img0: np.ndarray):
     return img
 
 
-def process_mask(protos, masks_in, bboxes, shape, upsample=False):
-    """
-    It takes the output of the mask head, and applies the mask to the bounding boxes. This is faster but produces
-    downsampled quality of mask
-
-    Args:
-      protos (torch.Tensor): [mask_dim, mask_h, mask_w]
-      masks_in (torch.Tensor): [n, mask_dim], n is number of masks after nms
-      bboxes (torch.Tensor): [n, 4], n is number of masks after nms
-      shape (tuple): the size of the input image (h,w)
-
-    Returns:
-      (torch.Tensor): The processed masks.
-    """
-
-    c, mh, mw = protos.shape  # CHW
-    ih, iw = shape
-
-    masks = (masks_in @ protos.float().view(c, -1)).sigmoid().view(-1, mh, mw)  # CHW
-    print("masks_in", masks_in.size())
-    print("protos", protos.float().view(c, -1).size())
-    
-    downsampled_bboxes = bboxes.clone()
-    downsampled_bboxes[:, 0] *= mw / iw
-    downsampled_bboxes[:, 2] *= mw / iw
-    downsampled_bboxes[:, 3] *= mh / ih
-    downsampled_bboxes[:, 1] *= mh / ih
-
-    masks = crop_mask(masks, downsampled_bboxes)  # CHW
-    if upsample:
-        masks = F.interpolate(masks[None], shape, mode='bilinear', align_corners=False)[0]  # CHW
-    return masks.gt_(0.5)
-
-def crop_mask(masks, boxes):
-    """
-    It takes a mask and a bounding box, and returns a mask that is cropped to the bounding box
-
-    Args:
-      masks (torch.Tensor): [h, w, n] tensor of masks
-      boxes (torch.Tensor): [n, 4] tensor of bbox coordinates in relative point form
-
-    Returns:
-      (torch.Tensor): The masks are being cropped to the bounding box.
-    """
-    n, h, w = masks.shape
-    x1, y1, x2, y2 = torch.chunk(boxes[:, :, None], 4, 1)  # x1 shape(1,1,n)
-    r = torch.arange(w, device=masks.device, dtype=x1.dtype)[None, None, :]  # rows shape(1,w,1)
-    c = torch.arange(h, device=masks.device, dtype=x1.dtype)[None, :, None]  # cols shape(h,1,1)
-    # print("x1: ", x1.shape, x1) # 6 1 1
-    # torch.set_printoptions(profile="full")
-    
-    # print("c>=y1: ", (c>= y1).shape, (c >= y1)[0,:,:])
-    # print("(r>= x1) * (c>= y1): ", ((r>= x1) * (c>= y1)).shape, ((r>= x1) * (c>= y1))[0,:80,:80])
-    # print("(r >= x1) * (r < x2)", ((r >= x1) * (r < x2)).shape, (r >= x1) * (r < x2))
-
-    a = masks * ((r >= x1) * (r < x2) * (c >= y1) * (c < y2)) # mask operation
-    # print("crop mask", a[0, :80,:80])
-    
-    return masks * ((r >= x1) * (r < x2) * (c >= y1) * (c < y2)) # mask operation
-
-def clip_segments(segments, shape):
-    """
-    It takes a list of line segments (x1,y1,x2,y2) and clips them to the image shape (height, width)
-
-    Args:
-      segments (list): a list of segments, each segment is a list of points, each point is a list of x,y
-    coordinates
-      shape (tuple): the shape of the image
-    """
-    if isinstance(segments, torch.Tensor):  # faster individually
-        segments[:, 0].clamp_(0, shape[1])  # x
-        segments[:, 1].clamp_(0, shape[0])  # y
-    else:  # np.array (faster grouped)
-        segments[:, 0] = segments[:, 0].clip(0, shape[1])  # x
-        segments[:, 1] = segments[:, 1].clip(0, shape[0])  # y
-
-def scale_segments(img1_shape, segments, img0_shape, ratio_pad=None, normalize=False):
-    """
-    Rescale segment coordinates (xyxy) from img1_shape to img0_shape
-
-    Args:
-      img1_shape (tuple): The shape of the image that the segments are from.
-      segments (torch.Tensor): the segments to be scaled
-      img0_shape (tuple): the shape of the image that the segmentation is being applied to
-      ratio_pad (tuple): the ratio of the image size to the padded image size.
-      normalize (bool): If True, the coordinates will be normalized to the range [0, 1]. Defaults to False
-
-    Returns:
-      segments (torch.Tensor): the segmented image.
-    """
-    if ratio_pad is None:  # calculate from img0_shape
-        gain = min(img1_shape[0] / img0_shape[0], img1_shape[1] / img0_shape[1])  # gain  = old / new
-        pad = (img1_shape[1] - img0_shape[1] * gain) / 2, (img1_shape[0] - img0_shape[0] * gain) / 2  # wh padding
-    else:
-        gain = ratio_pad[0][0]
-        pad = ratio_pad[1]
-
-    segments[:, 0] -= pad[0]  # x padding
-    segments[:, 1] -= pad[1]  # y padding
-    segments /= gain
-    clip_segments(segments, img0_shape)
-    if normalize:
-        segments[:, 0] /= img0_shape[1]  # width
-        segments[:, 1] /= img0_shape[0]  # height
-    return segments
-
-
-def masks2segments(masks, strategy='largest'):
-    """
-    It takes a list of masks(n,h,w) and returns a list of segments(n,xy)
-
-    Args:
-      masks (torch.Tensor): the output of the model, which is a tensor of shape (batch_size, 160, 160)
-      strategy (str): 'concat' or 'largest'. Defaults to largest
-
-    Returns:
-      segments (List): list of segment masks
-    """
-    segments = []
-    print("masks", masks.shape)
-    
-    for x in masks.int().cpu().numpy().astype('uint8'):
-        c = cv2.findContours(x, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
-        if c:
-            if strategy == 'concat':  # concatenate all segments
-                c = np.concatenate([x.reshape(-1, 2) for x in c])
-            elif strategy == 'largest':  # select largest segment
-                x = np.array(c[np.array([len(x) for x in c]).argmax()])
-                c = x.reshape(-1, 2)
-        else:
-            c = np.zeros((0, 2))  # no segments found
-        segments.append(c.astype('float32'))
-    return segments
-
-
 def yolov8_postprocess(
     pred_boxes:np.ndarray, 
     input_hw:Tuple[int, int], 
@@ -306,35 +168,27 @@ def yolov8_postprocess(
     
     results = []
     proto = torch.from_numpy(pred_masks) if pred_masks is not None else None
-    
-    # print("proto" , proto.size())
-    # print("preds", len(preds), preds[0].size())
 
     for i, pred in enumerate(preds):
         shape = orig_img[i].shape if isinstance(orig_img, list) else orig_img.shape
         if not len(pred):
-            print("==========NO PRED==========")
             results.append({"det": [], "segment": []})
             continue
         if proto is None:
-            print("==========NONE PROTO==========")
             pred[:, :4] = ops.scale_boxes(input_hw, pred[:, :4], shape).round()
             results.append({"det": pred})
             continue
         if retina_mask:
-            print("==========RETINA MASK==========")
             pred[:, :4] = ops.scale_boxes(input_hw, pred[:, :4], shape).round()
             masks = ops.process_mask_native(proto[i], pred[:, 6:], pred[:, :4], shape[:2])  # HWC
             segments = [ops.scale_segments(input_hw, x, shape, normalize=False) for x in ops.masks2segments(masks)]
         else:
-            print("==========ELSE==========")
-            
-            masks = process_mask(proto[i], pred[:, 6:], pred[:, :4], input_hw, upsample=True)  # HWC
+            masks = ops.process_mask(proto[i], pred[:, 6:], pred[:, :4], input_hw, upsample=True)  # HWC
 
             pred[:, :4] = ops.scale_boxes(input_hw, pred[:, :4], shape).round()
 
-            # segments = [ops.scale_segments(input_hw, x, shape, normalize=False) for x in masks2segments(masks)]
-            segments = [x for x in masks2segments(masks)]
+            segments = [ops.scale_segments(input_hw, x, shape, normalize=False) for x in ops.masks2segments(masks)]
+            # segments = [x for x in masks2segments(masks)]
         results.append({"det": pred[:, :6].numpy(), "segment": segments})
     return results
 
