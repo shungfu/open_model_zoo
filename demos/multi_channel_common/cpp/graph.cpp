@@ -84,7 +84,7 @@ namespace
 
         // Add border
         cv::copyMakeBorder(resized_img, resized_img, top, bottom, left, right, cv::BORDER_CONSTANT, color);
-        cv::imwrite("/opt/code/demos/multi_channel_object_detection_demo_yolov8/cpp/letterbox.jpg", resized_img);
+        // cv::imwrite("/opt/code/demos/multi_channel_object_detection_demo_yolov8/cpp/letterbox.jpg", resized_img);
         return resized_img;
     }
     void framesToTensor(const std::vector<std::shared_ptr<VideoFrame>> &frames, const ov::Tensor &tensor)
